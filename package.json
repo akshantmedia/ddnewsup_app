@@ -1,0 +1,12 @@
+{
+  "name": "ddnewsup-platform",
+  "private": true,
+  "workspaces": [
+    "mobile",
+    "backend"
+  ],
+  "scripts": {
+    "lint": "npm run lint -w mobile && npm run lint -w backend",
+    "test": "npm run test -w backend"
+  }
+}
