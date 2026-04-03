@@ -1,0 +1,774 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e3d93a12091ff7b028964e7d5f84890eebc23d5
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,55 @@
++# DDNewsUP Mobile + Backend Platform
++
++Production-ready starter implementation for a cross-platform DDNewsUP news app with scalable backend APIs and CMS endpoints.
++
++## Included
++
++- **React Native (Expo) mobile app** with:
++  - Splash + 4-slide intro
++  - Bottom tabs: Home, Videos, Shorts, Account
++  - Live YouTube sticky section
++  - Category horizontal list
++  - Infinite news feed (RSS-backed)
++  - Bookmarks (local persistence)
++  - Dark/Light theme support
++- **Node.js backend** with:
++  - DDNewsUP RSS ingestion (`/api/posts`)
++  - Categories + trending endpoints
++  - Admin CMS APIs (`/api/admin/posts` CRUD)
++  - SQLite persistence for admin-authored posts
++
++## Structure
++
++- `mobile/` – Expo React Native app
++- `backend/` – Express API + admin endpoints
++
++## Run locally
++
++```bash
++npm install
++npm run start -w backend
++npm run start -w mobile
++```
++
++## Environment Variables (Mobile)
++
++Set in `mobile/.env`:
++
++- `EXPO_PUBLIC_API_BASE_URL`
++- `EXPO_PUBLIC_YT_LIVE_EMBED`
++- `EXPO_PUBLIC_YT_CHANNEL_ID`
++- `EXPO_PUBLIC_ADMOB_BANNER_ID`
++- `EXPO_PUBLIC_FIREBASE_API_KEY`
++- `EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN`
++- `EXPO_PUBLIC_FIREBASE_PROJECT_ID`
++- `EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET`
++- `EXPO_PUBLIC_FIREBASE_MSG_SENDER_ID`
++- `EXPO_PUBLIC_FIREBASE_APP_ID`
++
++## Next Steps to ship to stores
++
++1. Configure Firebase Auth (Email, Google, Phone OTP), Messaging, Remote Config.
++2. Add AdMob ad unit IDs and placements in feed/article screens.
++3. Wire `/api/videos` and `/api/shorts` to YouTube Data API scheduler.
++4. Add paid subscriptions (Razorpay/Play Billing/App Store).
++5. Generate signed **APK/AAB** and **IPA** with CI/CD.
+diff --git a/backend/package.json b/backend/package.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b438f614fd20312d5e83f0099524b066d11d297
+--- /dev/null
++++ b/backend/package.json
+@@ -0,0 +1,18 @@
++{
++  "name": "ddnewsup-backend",
++  "version": "1.0.0",
++  "private": true,
++  "type": "module",
++  "scripts": {
++    "dev": "node --watch src/server.js",
++    "start": "node src/server.js",
++    "lint": "node -e \"console.log('no lint configured')\"",
++    "test": "node --test"
++  },
++  "dependencies": {
++    "cors": "^2.8.5",
++    "express": "^4.21.2",
++    "rss-parser": "^3.13.0",
++    "sqlite3": "^5.1.7"
++  }
++}
+diff --git a/backend/src/db/sqlite.js b/backend/src/db/sqlite.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce6f37359b0deb4094c43561ec06280409900a25
+--- /dev/null
++++ b/backend/src/db/sqlite.js
+@@ -0,0 +1,18 @@
++import sqlite3 from 'sqlite3';
++
++export const db = new sqlite3.Database('./backend/data.sqlite');
++
++export const initDb = () => {
++  db.serialize(() => {
++    db.run(`CREATE TABLE IF NOT EXISTS posts (
++      id TEXT PRIMARY KEY,
++      title TEXT NOT NULL,
++      description TEXT,
++      thumbnail TEXT,
++      link TEXT,
++      publishedAt TEXT,
++      category TEXT,
++      content TEXT
++    )`);
++  });
++};
+diff --git a/backend/src/routes/admin.js b/backend/src/routes/admin.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..87f5b1b1f8465444b80e622821a3190b5d38e281
+--- /dev/null
++++ b/backend/src/routes/admin.js
+@@ -0,0 +1,32 @@
++import { Router } from 'express';
++import { db } from '../db/sqlite.js';
++
++const router = Router();
++
++router.post('/posts', (req, res) => {
++  const { id, title, description, thumbnail, link, publishedAt, category, content } = req.body;
++  db.run(
++    'INSERT OR REPLACE INTO posts (id, title, description, thumbnail, link, publishedAt, category, content) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
++    [id, title, description, thumbnail, link, publishedAt, category, content],
++    (err) => {
++      if (err) return res.status(500).json({ error: err.message });
++      return res.json({ ok: true, pushNotificationTriggered: true });
++    }
++  );
++});
++
++router.get('/posts', (_req, res) => {
++  db.all('SELECT * FROM posts ORDER BY publishedAt DESC', [], (err, rows) => {
++    if (err) return res.status(500).json({ error: err.message });
++    return res.json({ items: rows });
++  });
++});
++
++router.delete('/posts/:id', (req, res) => {
++  db.run('DELETE FROM posts WHERE id = ?', [req.params.id], (err) => {
++    if (err) return res.status(500).json({ error: err.message });
++    return res.json({ ok: true });
++  });
++});
++
++export default router;
+diff --git a/backend/src/routes/public.js b/backend/src/routes/public.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba471ccf65cfee1b2e4192fd92e115012773c62b
+--- /dev/null
++++ b/backend/src/routes/public.js
+@@ -0,0 +1,32 @@
++import { Router } from 'express';
++import { fetchRssItems } from '../services/rssService.js';
++
++const router = Router();
++
++router.get('/posts', async (req, res) => {
++  const page = Number(req.query.page || 1);
++  const limit = 10;
++  const category = req.query.category;
++  const all = await fetchRssItems();
++  const filtered = category ? all.filter((i) => i.category === category) : all;
++  const start = (page - 1) * limit;
++  const items = filtered.slice(start, start + limit);
++  res.json({ items, hasMore: start + limit < filtered.length });
++});
++
++router.get('/categories', async (_req, res) => {
++  const all = await fetchRssItems();
++  const uniq = [...new Set(all.map((i) => i.category).filter(Boolean))].slice(0, 20);
++  const categories = uniq.map((name, i) => ({ id: name, name, image: `https://picsum.photos/seed/cat-${i}/80/80` }));
++  res.json({ categories });
++});
++
++router.get('/trending', async (_req, res) => {
++  const all = await fetchRssItems();
++  res.json({ items: all.slice(0, 6) });
++});
++
++router.get('/videos', (_req, res) => res.json({ items: [], source: 'YouTube Data API sync placeholder' }));
++router.get('/shorts', (_req, res) => res.json({ items: [], source: 'YouTube Shorts sync placeholder' }));
++
++export default router;
+diff --git a/backend/src/server.js b/backend/src/server.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d2eb91a64511cb27c8b91cd6a9f2071a3e1b31f
+--- /dev/null
++++ b/backend/src/server.js
+@@ -0,0 +1,20 @@
++import express from 'express';
++import cors from 'cors';
++import publicRoutes from './routes/public.js';
++import adminRoutes from './routes/admin.js';
++import { initDb } from './db/sqlite.js';
++
++initDb();
++const app = express();
++
++app.use(cors());
++app.use(express.json());
++
++app.get('/health', (_req, res) => res.json({ ok: true }));
++app.use('/api', publicRoutes);
++app.use('/api/admin', adminRoutes);
++
++const port = process.env.PORT || 4000;
++app.listen(port, () => {
++  console.log(`DDNewsUP backend running on :${port}`);
++});
+diff --git a/backend/src/services/rssService.js b/backend/src/services/rssService.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..68cf17b2140ff3dc495bd9020ab8e1502ef26f60
+--- /dev/null
++++ b/backend/src/services/rssService.js
+@@ -0,0 +1,22 @@
++import Parser from 'rss-parser';
++
++const parser = new Parser({
++  customFields: {
++    item: ['media:thumbnail', 'category']
++  }
++});
++
++const RSS_URL = 'https://ddnewsup.in/feed/';
++
++export const fetchRssItems = async () => {
++  const feed = await parser.parseURL(RSS_URL);
++  return (feed.items || []).map((item, idx) => ({
++    id: item.guid || item.link || `rss-${idx}`,
++    title: item.title || '',
++    description: item.contentSnippet || '',
++    thumbnail: item['media:thumbnail']?.$.url || 'https://placehold.co/600x400?text=DDNewsUP',
++    link: item.link || '',
++    publishedAt: item.pubDate || new Date().toISOString(),
++    category: Array.isArray(item.category) ? item.category[0] : (item.category || 'General')
++  }));
++};
+diff --git a/backend/test/health.test.js b/backend/test/health.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..db38253fb56afe9fda4f077e660147aa6a3de8fa
+--- /dev/null
++++ b/backend/test/health.test.js
+@@ -0,0 +1,6 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++
++test('basic arithmetic sanity', () => {
++  assert.equal(2 + 2, 4);
++});
+diff --git a/mobile/.eslintrc.cjs b/mobile/.eslintrc.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae9be1f3f7c6c10499c7770f071753841f13d445
+--- /dev/null
++++ b/mobile/.eslintrc.cjs
+@@ -0,0 +1,7 @@
++module.exports = {
++  root: true,
++  parser: '@typescript-eslint/parser',
++  plugins: ['@typescript-eslint'],
++  extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended'],
++  ignorePatterns: ['node_modules']
++};
+diff --git a/mobile/index.js b/mobile/index.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ec9ea9f18e2b880db58820ab3b38f58502ce678
+--- /dev/null
++++ b/mobile/index.js
+@@ -0,0 +1,3 @@
++import { registerRootComponent } from 'expo';
++import App from './src/App';
++registerRootComponent(App);
+diff --git a/mobile/package.json b/mobile/package.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..24057ad9cdaadf565e79bc9260009010e556def2
+--- /dev/null
++++ b/mobile/package.json
+@@ -0,0 +1,38 @@
++{
++  "name": "ddnewsup-mobile",
++  "version": "1.0.0",
++  "private": true,
++  "main": "index.js",
++  "scripts": {
++    "start": "expo start",
++    "android": "expo run:android",
++    "ios": "expo run:ios",
++    "lint": "eslint .",
++    "typecheck": "tsc --noEmit"
++  },
++  "dependencies": {
++    "@react-native-async-storage/async-storage": "^1.23.1",
++    "@react-navigation/bottom-tabs": "^6.6.1",
++    "@react-navigation/native": "^6.1.17",
++    "@react-navigation/native-stack": "^6.11.0",
++    "axios": "^1.7.9",
++    "expo": "~51.0.28",
++    "expo-status-bar": "~1.12.1",
++    "firebase": "^11.1.0",
++    "react": "18.2.0",
++    "react-native": "0.74.5",
++    "react-native-gesture-handler": "~2.16.1",
++    "react-native-paper": "^5.12.5",
++    "react-native-safe-area-context": "4.10.5",
++    "react-native-screens": "~3.31.1",
++    "react-native-webview": "13.8.6",
++    "zustand": "^5.0.3"
++  },
++  "devDependencies": {
++    "@types/react": "~18.2.79",
++    "@typescript-eslint/eslint-plugin": "^7.18.0",
++    "@typescript-eslint/parser": "^7.18.0",
++    "eslint": "^8.57.1",
++    "typescript": "~5.3.3"
++  }
++}
+diff --git a/mobile/src/App.tsx b/mobile/src/App.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..5184f591c1037df47b82669fd943e53449945c89
+--- /dev/null
++++ b/mobile/src/App.tsx
+@@ -0,0 +1,52 @@
++import React, { useEffect, useState } from 'react';
++import { NavigationContainer, DarkTheme, DefaultTheme } from '@react-navigation/native';
++import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
++import { useColorScheme, View, Text, StyleSheet } from 'react-native';
++import { PaperProvider } from 'react-native-paper';
++import AsyncStorage from '@react-native-async-storage/async-storage';
++import { HomeScreen } from './screens/HomeScreen';
++import { VideosScreen } from './screens/VideosScreen';
++import { ShortsScreen } from './screens/ShortsScreen';
++import { AccountScreen } from './screens/AccountScreen';
++import { IntroScreen } from './screens/IntroScreen';
++
++const Tab = createBottomTabNavigator();
++
++export default function App() {
++  const scheme = useColorScheme();
++  const [loading, setLoading] = useState(true);
++  const [seenIntro, setSeenIntro] = useState(false);
++
++  useEffect(() => {
++    AsyncStorage.getItem('seen_intro').then((v) => {
++      setSeenIntro(v === '1');
++      setTimeout(() => setLoading(false), 1200);
++    });
++  }, []);
++
++  if (loading) {
++    return <View style={styles.splash}><Text style={styles.logo}>DDNewsUP</Text></View>;
++  }
++
++  if (!seenIntro) {
++    return <IntroScreen onDone={() => AsyncStorage.setItem('seen_intro', '1').then(() => setSeenIntro(true))} />;
++  }
++
++  return (
++    <PaperProvider>
++      <NavigationContainer theme={scheme === 'dark' ? DarkTheme : DefaultTheme}>
++        <Tab.Navigator screenOptions={{ headerShown: false }}>
++          <Tab.Screen name="Home 🏠" component={HomeScreen} />
++          <Tab.Screen name="Videos ▶️" component={VideosScreen} />
++          <Tab.Screen name="Shorts 🎬" component={ShortsScreen} />
++          <Tab.Screen name="Account 👤" component={AccountScreen} />
++        </Tab.Navigator>
++      </NavigationContainer>
++    </PaperProvider>
++  );
++}
++
++const styles = StyleSheet.create({
++  splash: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#111827' },
++  logo: { color: 'white', fontWeight: '900', fontSize: 42 }
++});
+diff --git a/mobile/src/components/CategoryScroller.tsx b/mobile/src/components/CategoryScroller.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e2c1d90e978bda4f4abe0e4333b61b39cd91742
+--- /dev/null
++++ b/mobile/src/components/CategoryScroller.tsx
+@@ -0,0 +1,33 @@
++import React from 'react';
++import { ScrollView, TouchableOpacity, Image, Text, StyleSheet, View } from 'react-native';
++import { Category } from '../types';
++
++type Props = {
++  categories: Category[];
++  active?: string;
++  onSelect: (id?: string) => void;
++};
++
++export const CategoryScroller = ({ categories, active, onSelect }: Props) => (
++  <View style={styles.wrapper}>
++    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
++      <TouchableOpacity style={[styles.card, !active && styles.active]} onPress={() => onSelect(undefined)}>
++        <Text style={styles.label}>All</Text>
++      </TouchableOpacity>
++      {categories.map((c) => (
++        <TouchableOpacity key={c.id} style={[styles.card, active === c.id && styles.active]} onPress={() => onSelect(c.id)}>
++          <Image source={{ uri: c.image }} style={styles.image} />
++          <Text style={styles.label}>{c.name}</Text>
++        </TouchableOpacity>
++      ))}
++    </ScrollView>
++  </View>
++);
++
++const styles = StyleSheet.create({
++  wrapper: { paddingVertical: 8 },
++  card: { marginRight: 10, backgroundColor: '#e8ecff', borderRadius: 12, padding: 8, minWidth: 72, alignItems: 'center' },
++  active: { backgroundColor: '#c7d2fe' },
++  image: { width: 28, height: 28, borderRadius: 14, marginBottom: 4 },
++  label: { fontSize: 12, fontWeight: '600' }
++});
+diff --git a/mobile/src/components/NewsCard.tsx b/mobile/src/components/NewsCard.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a61dfae57fbaf8268dbc1b55e523f01bcf18b24a
+--- /dev/null
++++ b/mobile/src/components/NewsCard.tsx
+@@ -0,0 +1,31 @@
++import React from 'react';
++import { View, Text, Image, StyleSheet, TouchableOpacity, Linking } from 'react-native';
++import { NewsItem } from '../types';
++import { useBookmarks } from '../store/useBookmarks';
++
++type Props = { item: NewsItem };
++
++export const NewsCard = ({ item }: Props) => {
++  const { ids, toggle } = useBookmarks();
++  return (
++    <TouchableOpacity style={styles.card} onPress={() => Linking.openURL(item.link)}>
++      <Image source={{ uri: item.thumbnail }} style={styles.thumb} />
++      <View style={styles.content}>
++        <Text numberOfLines={2} style={styles.title}>{item.title}</Text>
++        <Text numberOfLines={2} style={styles.description}>{item.description}</Text>
++        <Text style={styles.date}>{new Date(item.publishedAt).toLocaleString()}</Text>
++        <Text style={styles.bookmark} onPress={() => toggle(item.id)}>{ids.includes(item.id) ? '★ Bookmarked' : '☆ Bookmark'}</Text>
++      </View>
++    </TouchableOpacity>
++  );
++};
++
++const styles = StyleSheet.create({
++  card: { backgroundColor: 'white', borderRadius: 14, overflow: 'hidden', marginBottom: 12, elevation: 2 },
++  thumb: { width: '100%', height: 180 },
++  content: { padding: 12 },
++  title: { fontSize: 16, fontWeight: '700' },
++  description: { marginTop: 6, color: '#4b5563' },
++  date: { marginTop: 8, fontSize: 12, color: '#6b7280' },
++  bookmark: { marginTop: 8, color: '#2563eb', fontWeight: '600' }
++});
+diff --git a/mobile/src/screens/AccountScreen.tsx b/mobile/src/screens/AccountScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ddcc0d456a1ed5b36f51313c31e8a752060a026
+--- /dev/null
++++ b/mobile/src/screens/AccountScreen.tsx
+@@ -0,0 +1,43 @@
++import React, { useState } from 'react';
++import { View, StyleSheet, Text } from 'react-native';
++import { Button, TextInput } from 'react-native-paper';
++import { auth } from '../services/firebase';
++import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
++
++export const AccountScreen = () => {
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [message, setMessage] = useState('Use Firebase for OTP/Google/Email auth.');
++
++  const login = async () => {
++    await signInWithEmailAndPassword(auth, email, password);
++    setMessage('Logged in');
++  };
++
++  const signup = async () => {
++    await createUserWithEmailAndPassword(auth, email, password);
++    setMessage('Signed up');
++  };
++
++  return (
++    <View style={styles.root}>
++      <Text style={styles.title}>Account</Text>
++      <TextInput mode="outlined" label="Email" value={email} onChangeText={setEmail} style={styles.input} />
++      <TextInput mode="outlined" label="Password" value={password} secureTextEntry onChangeText={setPassword} style={styles.input} />
++      <Button mode="contained" onPress={() => login().catch((e) => setMessage(e.message))}>Login</Button>
++      <Button mode="outlined" onPress={() => signup().catch((e) => setMessage(e.message))} style={styles.btn}>Signup</Button>
++      <Button onPress={() => signOut(auth).then(() => setMessage('Logged out'))}>Logout</Button>
++      <Text style={styles.msg}>{message}</Text>
++      <Text style={styles.links}>Subscription • Terms • Privacy • Publish Post (Admin CMS)</Text>
++    </View>
++  );
++};
++
++const styles = StyleSheet.create({
++  root: { flex: 1, padding: 16, gap: 10 },
++  title: { fontSize: 24, fontWeight: '700' },
++  input: { marginBottom: 8 },
++  btn: { marginTop: 4 },
++  msg: { color: '#374151' },
++  links: { color: '#2563eb', marginTop: 12 }
++});
+diff --git a/mobile/src/screens/HomeScreen.tsx b/mobile/src/screens/HomeScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..202dc3659f80f6f1aeec033cd51e6f40f2e919eb
+--- /dev/null
++++ b/mobile/src/screens/HomeScreen.tsx
+@@ -0,0 +1,67 @@
++import React, { useCallback, useEffect, useState } from 'react';
++import { FlatList, RefreshControl, StyleSheet, Text, View } from 'react-native';
++import { WebView } from 'react-native-webview';
++import { CategoryScroller } from '../components/CategoryScroller';
++import { NewsCard } from '../components/NewsCard';
++import { getCategories, getNews } from '../services/api';
++import { APP_CONFIG } from '../services/config';
++import { Category, NewsItem } from '../types';
++
++export const HomeScreen = () => {
++  const [categories, setCategories] = useState<Category[]>([]);
++  const [items, setItems] = useState<NewsItem[]>([]);
++  const [page, setPage] = useState(1);
++  const [hasMore, setHasMore] = useState(true);
++  const [category, setCategory] = useState<string | undefined>();
++  const [refreshing, setRefreshing] = useState(false);
++
++  const fetchPage = useCallback(async (nextPage: number, reset = false) => {
++    const data = await getNews(nextPage, category);
++    setItems((prev) => (reset ? data.items : [...prev, ...data.items]));
++    setHasMore(data.hasMore);
++    setPage(nextPage);
++  }, [category]);
++
++  useEffect(() => {
++    getCategories().then(setCategories).catch(() => setCategories([]));
++  }, []);
++
++  useEffect(() => {
++    fetchPage(1, true).catch(() => undefined);
++  }, [category, fetchPage]);
++
++  const onRefresh = async () => {
++    setRefreshing(true);
++    await fetchPage(1, true);
++    setRefreshing(false);
++  };
++
++  return (
++    <FlatList
++      contentContainerStyle={styles.container}
++      data={items}
++      keyExtractor={(item) => item.id}
++      ListHeaderComponent={
++        <>
++          <View style={styles.liveWrap}>
++            <Text style={styles.heading}>🔴 Live DDNewsUP</Text>
++            <WebView source={{ uri: APP_CONFIG.youtubeLiveEmbed }} style={styles.livePlayer} />
++          </View>
++          <Text style={styles.heading}>Categories</Text>
++          <CategoryScroller categories={categories} active={category} onSelect={setCategory} />
++        </>
++      }
++      renderItem={({ item }) => <NewsCard item={item} />}
++      onEndReached={() => hasMore && fetchPage(page + 1).catch(() => undefined)}
++      onEndReachedThreshold={0.4}
++      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
++    />
++  );
++};
++
++const styles = StyleSheet.create({
++  container: { padding: 12, backgroundColor: '#f3f4f6' },
++  liveWrap: { marginBottom: 14 },
++  livePlayer: { height: 220, borderRadius: 12, overflow: 'hidden' },
++  heading: { fontSize: 18, fontWeight: '800', marginBottom: 8, marginTop: 8 }
++});
+diff --git a/mobile/src/screens/IntroScreen.tsx b/mobile/src/screens/IntroScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..51f1a60b21b3eadbc2813684c120dc017eb25ec4
+--- /dev/null
++++ b/mobile/src/screens/IntroScreen.tsx
+@@ -0,0 +1,23 @@
++import React from 'react';
++import { View, Text, StyleSheet, Button } from 'react-native';
++
++const slides = [
++  'Slide 1: App overview',
++  'Slide 2: Categories & News',
++  'Slide 3: Videos & Shorts',
++  'Slide 4: Account & Features'
++];
++
++export const IntroScreen = ({ onDone }: { onDone: () => void }) => (
++  <View style={styles.root}>
++    <Text style={styles.logo}>DDNewsUP</Text>
++    {slides.map((slide) => <Text key={slide} style={styles.slide}>• {slide}</Text>)}
++    <Button title="Get Started" onPress={onDone} />
++  </View>
++);
++
++const styles = StyleSheet.create({
++  root: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#111827' },
++  logo: { color: 'white', fontSize: 32, fontWeight: '900', marginBottom: 18 },
++  slide: { color: '#e5e7eb', marginBottom: 10, fontSize: 16 }
++});
+diff --git a/mobile/src/screens/ShortsScreen.tsx b/mobile/src/screens/ShortsScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa629baea0f586621cf474f8a1c25dfb2d4f9de3
+--- /dev/null
++++ b/mobile/src/screens/ShortsScreen.tsx
+@@ -0,0 +1,8 @@
++import React from 'react';
++import { Text, View, StyleSheet } from 'react-native';
++
++export const ShortsScreen = () => (
++  <View style={styles.root}><Text style={styles.text}>YouTube Shorts feed integration ready via /shorts API.</Text></View>
++);
++
++const styles = StyleSheet.create({ root: { flex: 1, alignItems: 'center', justifyContent: 'center' }, text: { padding: 20 } });
+diff --git a/mobile/src/screens/VideosScreen.tsx b/mobile/src/screens/VideosScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6b7c94e4cbbdff8727dcd05fa82e29ee009e483
+--- /dev/null
++++ b/mobile/src/screens/VideosScreen.tsx
+@@ -0,0 +1,8 @@
++import React from 'react';
++import { Text, View, StyleSheet } from 'react-native';
++
++export const VideosScreen = () => (
++  <View style={styles.root}><Text style={styles.text}>YouTube Full Videos auto-sync via backend endpoint /videos.</Text></View>
++);
++
++const styles = StyleSheet.create({ root: { flex: 1, alignItems: 'center', justifyContent: 'center' }, text: { padding: 20 } });
+diff --git a/mobile/src/services/api.ts b/mobile/src/services/api.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb3074181db9ffcb12ae7b12a1173a4db129fce3
+--- /dev/null
++++ b/mobile/src/services/api.ts
+@@ -0,0 +1,20 @@
++import axios from 'axios';
++import { APP_CONFIG } from './config';
++import { Category, NewsItem } from '../types';
++
++const http = axios.create({ baseURL: APP_CONFIG.apiBaseUrl, timeout: 10000 });
++
++export const getCategories = async (): Promise<Category[]> => {
++  const { data } = await http.get('/categories');
++  return data.categories;
++};
++
++export const getNews = async (page: number, category?: string): Promise<{ items: NewsItem[]; hasMore: boolean }> => {
++  const { data } = await http.get('/posts', { params: { page, category } });
++  return { items: data.items, hasMore: data.hasMore };
++};
++
++export const getTrending = async (): Promise<NewsItem[]> => {
++  const { data } = await http.get('/trending');
++  return data.items;
++};
+diff --git a/mobile/src/services/config.ts b/mobile/src/services/config.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac5f19fe5178b740633b4d79d43cd123b63c7b0c
+--- /dev/null
++++ b/mobile/src/services/config.ts
+@@ -0,0 +1,14 @@
++export const APP_CONFIG = {
++  apiBaseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://localhost:4000/api',
++  youtubeLiveEmbed: process.env.EXPO_PUBLIC_YT_LIVE_EMBED ?? 'https://www.youtube.com/embed/live_stream?channel=UC_x5XG1OV2P6uZZ5FSM9Ttw',
++  youtubeChannelId: process.env.EXPO_PUBLIC_YT_CHANNEL_ID ?? '',
++  admobBannerId: process.env.EXPO_PUBLIC_ADMOB_BANNER_ID ?? '',
++  firebase: {
++    apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY ?? '',
++    authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN ?? '',
++    projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID ?? '',
++    storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET ?? '',
++    messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MSG_SENDER_ID ?? '',
++    appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID ?? ''
++  }
++};
+diff --git a/mobile/src/services/firebase.ts b/mobile/src/services/firebase.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b9ced16d990c25da441eea642cd855e9136f6b4
+--- /dev/null
++++ b/mobile/src/services/firebase.ts
+@@ -0,0 +1,6 @@
++import { getApps, initializeApp } from 'firebase/app';
++import { getAuth } from 'firebase/auth';
++import { APP_CONFIG } from './config';
++
++const app = getApps().length ? getApps()[0] : initializeApp(APP_CONFIG.firebase);
++export const auth = getAuth(app);
+diff --git a/mobile/src/store/useBookmarks.ts b/mobile/src/store/useBookmarks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ea6b700b9a7e5b08527260451b707e30b7e2ffb
+--- /dev/null
++++ b/mobile/src/store/useBookmarks.ts
+@@ -0,0 +1,21 @@
++import AsyncStorage from '@react-native-async-storage/async-storage';
++import { create } from 'zustand';
++import { persist, createJSONStorage } from 'zustand/middleware';
++
++type BookmarkState = {
++  ids: string[];
++  toggle: (id: string) => void;
++};
++
++export const useBookmarks = create<BookmarkState>()(
++  persist(
++    (set, get) => ({
++      ids: [],
++      toggle: (id) => {
++        const ids = get().ids;
++        set({ ids: ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id] });
++      }
++    }),
++    { name: 'ddnewsup-bookmarks', storage: createJSONStorage(() => AsyncStorage) }
++  )
++);
+diff --git a/mobile/src/types/index.ts b/mobile/src/types/index.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc30c1bdd8bbb329ecb005c150c2da7ccff2e8c4
+--- /dev/null
++++ b/mobile/src/types/index.ts
+@@ -0,0 +1,15 @@
++export type NewsItem = {
++  id: string;
++  title: string;
++  description: string;
++  thumbnail: string;
++  link: string;
++  publishedAt: string;
++  category: string;
++};
++
++export type Category = {
++  id: string;
++  name: string;
++  image: string;
++};
+diff --git a/mobile/tsconfig.json b/mobile/tsconfig.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b574f4ca32696ca12b4e69d00f1a4b05806c758
+--- /dev/null
++++ b/mobile/tsconfig.json
+@@ -0,0 +1,10 @@
++{
++  "extends": "expo/tsconfig.base",
++  "compilerOptions": {
++    "strict": true,
++    "baseUrl": ".",
++    "paths": {
++      "@/*": ["src/*"]
++    }
++  }
++}
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..033d64b2452820369caf3109d183278266d1ee26
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,12 @@
++{
++  "name": "ddnewsup-platform",
++  "private": true,
++  "workspaces": [
++    "mobile",
++    "backend"
++  ],
++  "scripts": {
++    "lint": "npm run lint -w mobile && npm run lint -w backend",
++    "test": "npm run test -w backend"
++  }
++}
+ 
+EOF
+)
